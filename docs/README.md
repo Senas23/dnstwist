@@ -1,5 +1,5 @@
-dnstwist
-========
+![dnstwist](/docs/dnstwist.png)
+===============================
 
 See what sort of trouble users can get in trying to type your domain name.
 Find lookalike domains that adversaries can use to attack you. Can detect
@@ -50,16 +50,23 @@ $ cd dnstwist
 $ pip install .
 ```
 
+**Kali Linux**
+
+Invoke the following command to install the tool with all extra packages:
+
+```
+# apt install dnstwist
+```
+
 **OSX**
 
-Installation is simplified thanks to [Homebrew](https://brew.sh/) package:
+Installation is simplified thanks to [Homebrew](https://brew.sh/) package.
+This will install `dnstwist` along with all dependencies, and the binary will
+be added to `$PATH`.
 
 ```
 $ brew install dnstwist
 ```
-
-This will install `dnstwist` along with all dependencies, and the binary will
-be added to `$PATH`.
 
 **Docker**
 
@@ -75,8 +82,6 @@ Requirements
 
 This tool is designed to run fine with just standard Python3 library. However,
 a couple of third-party packages are required to show its full potential.
-
-**Debian/Ubuntu/Kali Linux**
 
 If running Debian-based distribution, you can install all external libraries
 with just single command:
@@ -212,9 +217,9 @@ aggressors is unlimited.
 Unicode tables consist of thousands of characters with many of them visually
 similar to each other. However, despite the fact certain characters are
 encodable using punycode, most TLD authorities will reject them during domain
-registration process. In genaral, TLD authorities disallow mixing of characters
+registration process. In general, TLD authorities disallow mixing of characters
 coming from different Unicode scripts or maintain their own sets of acceptable
-characters. With that being said, the homogylph fuzzer was build on top of
+characters. With that being said, the homoglyph fuzzer was build on top of
 carefully researched range of Unicode characters (homoglyphs) to ensure that
 generated domains can be registered in practice.
 
@@ -226,8 +231,10 @@ The scanner is utilized by tens of SOC and incident response teams around the
 globe, as well as independent information security analysts and researchers.
 On top of this, it's integrated into products and services of many security
 providers, in particular but not only:
-Splunk, RecordedFuture, SpiderFoot, DigitalShadows, SecurityRisk, SmartFense,
-ThreatPipes, Cortex XSOAR, Mimecast.
+
+Splunk ESCU, RecordedFuture, SpiderFoot, DigitalShadows, SecurityRisk,
+SmartFense, ThreatPipes, PaloAlto Cortex XSOAR, Rapid7 InsightConnect SOAR,
+Mimecast, Watcher, Intel Owl, PatrOwl, VDA Labs, Appsecco.
 
 
 Contact

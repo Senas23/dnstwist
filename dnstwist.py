@@ -25,7 +25,7 @@ limitations under the License.
 '''
 
 __author__ = 'Marcin Ulikowski'
-__version__ = '20200707'
+__version__ = '20201228'
 __email__ = 'marcin@ulikowski.pl'
 
 import re
@@ -35,40 +35,35 @@ import signal
 import time
 import argparse
 import threading
-from random import randint
 from os import path
 import smtplib
 import json
 import queue
 
 try:
-	import dns.resolver
+	from dns.resolver import Resolver, NXDOMAIN, NoNameservers
 	import dns.rdatatype
 	from dns.exception import DNSException
 	MODULE_DNSPYTHON = True
 except ImportError:
 	MODULE_DNSPYTHON = False
-	pass
 
 try:
 	import GeoIP
 	MODULE_GEOIP = True
 except ImportError:
 	MODULE_GEOIP = False
-	pass
 else:
 	try:
-		_ = GeoIP.new(GeoIP.GEOIP_MEMORY_CACHE)
+		_ = GeoIP.new(-1)
 	except Exception:
 		MODULE_GEOIP = False
-		pass
 
 try:
 	import whois
 	MODULE_WHOIS = True
 except ImportError:
 	MODULE_WHOIS = False
-	pass
 
 try:
 	import ssdeep
@@ -79,7 +74,6 @@ except ImportError:
 		MODULE_SSDEEP = True
 	except ImportError:
 		MODULE_SSDEEP = False
-		pass
 
 try:
 	import requests
@@ -87,8 +81,20 @@ try:
 	MODULE_REQUESTS = True
 except ImportError:
 	MODULE_REQUESTS = False
-	pass
 
+try:
+	import idna
+except ImportError:
+	class idna:
+		@staticmethod
+		def decode(domain):
+			return domain.encode().decode('idna')
+		@staticmethod
+		def encode(domain):
+			return domain.encode('idna')
+
+
+VALID_FQDN_REGEX = re.compile(r'(?=^.{4,253}$)(^((?!-)[a-zA-Z0-9-]{1,63}(?<!-)\.)+[a-zA-Z]{2,63}$)', re.IGNORECASE)
 
 REQUEST_TIMEOUT_DNS = 2.5
 REQUEST_RETRIES_DNS = 2
@@ -97,7 +103,7 @@ REQUEST_TIMEOUT_SMTP = 5
 THREAD_COUNT_DEFAULT = 10
 
 if sys.platform != 'win32' and sys.stdout.isatty():
-	FG_RND = '\x1b[3%dm' % randint(1, 8)
+	FG_RND = '\x1b[3{}m'.format(int(time.time())%8+1)
 	FG_YEL = '\x1b[33m'
 	FG_CYA = '\x1b[36m'
 	FG_BLU = '\x1b[34m'
@@ -157,9 +163,14 @@ class UrlParser():
 	def __validate_domain(self, domain):
 		if len(domain) > 253:
 			return False
-		domain = domain.strip('.')
-		allowed = re.compile('\A([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}\Z', re.IGNORECASE)
-		return allowed.match(domain)
+		if VALID_FQDN_REGEX.match(domain):
+			try:
+				_ = idna.decode(domain)
+			except Exception:
+				return False
+			else:
+				return True
+		return False
 
 	def full_uri(self):
 		return self.scheme + '://' + self.domain + self.path + self.query
@@ -167,9 +178,10 @@ class UrlParser():
 
 class DomainFuzz():
 	def __init__(self, domain, dictionary=[], tld_dictionary=[]):
-		self.subdomain, self.domain, self.tld = self.__domain_tld(domain)
-		self.dictionary = dictionary
-		self.tld_dictionary = tld_dictionary
+		self.subdomain, self.domain, self.tld = self.domain_tld(domain)
+		self.domain = idna.decode(self.domain)
+		self.dictionary = list(dictionary)
+		self.tld_dictionary = list(tld_dictionary)
 		self.domains = []
 		self.qwerty = {
 			'1': '2q', '2': '3wq1', '3': '4ew2', '4': '5re3', '5': '6tr4', '6': '7yt5', '7': '8uy6', '8': '9iu7', '9': '0oi8', '0': 'po9',
@@ -191,7 +203,8 @@ class DomainFuzz():
 			}
 		self.keyboards = [self.qwerty, self.qwertz, self.azerty]
 
-	def __domain_tld(self, domain):
+	@staticmethod
+	def domain_tld(domain):
 		try:
 			from tld import parse_tld
 		except ImportError:
@@ -211,20 +224,21 @@ class DomainFuzz():
 				d = ('',) * (3-len(d)) + d
 			return d
 
-	def __filter_domains(self):
-		def idna(domain):
+	def __postprocess(self):
+		def punycode(domain):
 			try:
-				return domain.encode('idna').decode()
-			except UnicodeError:
-				return b''
-		idna_domains = list(map(idna, [x['domain-name'] for x in self.domains]))
-		valid_regex = re.compile('(?=^.{4,253}$)(^((?!-)[a-zA-Z0-9-]{1,63}(?<!-)\.)+[a-zA-Z]{2,63}\.?$)', re.IGNORECASE)
+				return idna.encode(domain).decode()
+			except Exception:
+				return ''
+		for idx, domain in enumerate(map(punycode, [x.get('domain-name') for x in self.domains])):
+			self.domains[idx]['domain-name'] = domain
 		seen = set()
 		filtered = []
-		for idx, domain in enumerate(idna_domains):
-			if valid_regex.match(domain) and domain not in seen:
-				filtered.append(self.domains[idx])
-				seen.add(domain)
+		for domain in self.domains:
+			name = domain.get('domain-name')
+			if VALID_FQDN_REGEX.match(name) and name not in seen:
+				filtered.append(domain)
+				seen.add(name)
 		self.domains = filtered
 
 	def __bitsquatting(self):
@@ -241,31 +255,31 @@ class DomainFuzz():
 
 	def __homoglyph(self):
 		glyphs = {
-			'a': [u'à', u'á', u'â', u'ã', u'ä', u'å', u'ɑ', u'ạ', u'ǎ', u'ă', u'ȧ', u'ą'],
-			'b': ['d', 'lb', u'ʙ', u'ɓ', u'ḃ', u'ḅ', u'ḇ', u'ƅ'],
-			'c': ['e', u'ƈ', u'ċ', u'ć', u'ç', u'č', u'ĉ'],
-			'd': ['b', 'cl', 'dl', u'ɗ', u'đ', u'ď', u'ɖ', u'ḑ', u'ḋ', u'ḍ', u'ḏ', u'ḓ'],
-			'e': ['c', u'é', u'è', u'ê', u'ë', u'ē', u'ĕ', u'ě', u'ė', u'ẹ', u'ę', u'ȩ', u'ɇ', u'ḛ'],
-			'f': [u'ƒ', u'ḟ'],
-			'g': ['q', u'ɢ', u'ɡ', u'ġ', u'ğ', u'ǵ', u'ģ', u'ĝ', u'ǧ', u'ǥ'],
-			'h': ['lh', u'ĥ', u'ȟ', u'ħ', u'ɦ', u'ḧ', u'ḩ', u'ⱨ', u'ḣ', u'ḥ', u'ḫ', u'ẖ'],
-			'i': ['1', 'l', u'í', u'ì', u'ï', u'ı', u'ɩ', u'ǐ', u'ĭ', u'ỉ', u'ị', u'ɨ', u'ȋ', u'ī'],
-			'j': [u'ʝ', u'ɉ'],
-			'k': ['lk', 'ik', 'lc', u'ḳ', u'ḵ', u'ⱪ', u'ķ'],
-			'l': ['1', 'i', u'ɫ', u'ł'],
-			'm': ['n', 'nn', 'rn', 'rr', u'ṁ', u'ṃ', u'ᴍ', u'ɱ', u'ḿ'],
-			'n': ['m', 'r', u'ń', u'ṅ', u'ṇ', u'ṉ', u'ñ', u'ņ', u'ǹ', u'ň', u'ꞑ'],
-			'o': ['0', u'ȯ', u'ọ', u'ỏ', u'ơ', u'ó', u'ö'],
-			'p': [u'ƿ', u'ƥ', u'ṕ', u'ṗ'],
-			'q': ['g', u'ʠ'],
-			'r': [u'ʀ', u'ɼ', u'ɽ', u'ŕ', u'ŗ', u'ř', u'ɍ', u'ɾ', u'ȓ', u'ȑ', u'ṙ', u'ṛ', u'ṟ'],
-			's': [u'ʂ', u'ś', u'ṣ', u'ṡ', u'ș', u'ŝ', u'š'],
-			't': [u'ţ', u'ŧ', u'ṫ', u'ṭ', u'ț', u'ƫ'],
-			'u': [u'ᴜ', u'ǔ', u'ŭ', u'ü', u'ʉ', u'ù', u'ú', u'û', u'ũ', u'ū', u'ų', u'ư', u'ů', u'ű', u'ȕ', u'ȗ', u'ụ'],
-			'v': [u'ṿ', u'ⱱ', u'ᶌ', u'ṽ', u'ⱴ'],
-			'w': ['vv', u'ŵ', u'ẁ', u'ẃ', u'ẅ', u'ⱳ', u'ẇ', u'ẉ', u'ẘ'],
-			'y': [u'ʏ', u'ý', u'ÿ', u'ŷ', u'ƴ', u'ȳ', u'ɏ', u'ỿ', u'ẏ', u'ỵ'],
-			'z': [u'ʐ', u'ż', u'ź', u'ᴢ', u'ƶ', u'ẓ', u'ẕ', u'ⱬ']
+			'a': ['à', 'á', 'â', 'ã', 'ä', 'å', 'ɑ', 'ạ', 'ǎ', 'ă', 'ȧ', 'ą'],
+			'b': ['d', 'lb', 'ʙ', 'ɓ', 'ḃ', 'ḅ', 'ḇ', 'ƅ'],
+			'c': ['e', 'ƈ', 'ċ', 'ć', 'ç', 'č', 'ĉ'],
+			'd': ['b', 'cl', 'dl', 'ɗ', 'đ', 'ď', 'ɖ', 'ḑ', 'ḋ', 'ḍ', 'ḏ', 'ḓ'],
+			'e': ['c', 'é', 'è', 'ê', 'ë', 'ē', 'ĕ', 'ě', 'ė', 'ẹ', 'ę', 'ȩ', 'ɇ', 'ḛ'],
+			'f': ['ƒ', 'ḟ'],
+			'g': ['q', 'ɢ', 'ɡ', 'ġ', 'ğ', 'ǵ', 'ģ', 'ĝ', 'ǧ', 'ǥ'],
+			'h': ['lh', 'ĥ', 'ȟ', 'ħ', 'ɦ', 'ḧ', 'ḩ', 'ⱨ', 'ḣ', 'ḥ', 'ḫ', 'ẖ'],
+			'i': ['1', 'l', 'í', 'ì', 'ï', 'ı', 'ɩ', 'ǐ', 'ĭ', 'ỉ', 'ị', 'ɨ', 'ȋ', 'ī'],
+			'j': ['ʝ', 'ɉ'],
+			'k': ['lk', 'ik', 'lc', 'ḳ', 'ḵ', 'ⱪ', 'ķ'],
+			'l': ['1', 'i', 'ɫ', 'ł'],
+			'm': ['n', 'nn', 'rn', 'rr', 'ṁ', 'ṃ', 'ᴍ', 'ɱ', 'ḿ'],
+			'n': ['m', 'r', 'ń', 'ṅ', 'ṇ', 'ṉ', 'ñ', 'ņ', 'ǹ', 'ň', 'ꞑ'],
+			'o': ['0', 'ȯ', 'ọ', 'ỏ', 'ơ', 'ó', 'ö'],
+			'p': ['ƿ', 'ƥ', 'ṕ', 'ṗ'],
+			'q': ['g', 'ʠ'],
+			'r': ['ʀ', 'ɼ', 'ɽ', 'ŕ', 'ŗ', 'ř', 'ɍ', 'ɾ', 'ȓ', 'ȑ', 'ṙ', 'ṛ', 'ṟ'],
+			's': ['ʂ', 'ś', 'ṣ', 'ṡ', 'ș', 'ŝ', 'š'],
+			't': ['ţ', 'ŧ', 'ṫ', 'ṭ', 'ț', 'ƫ'],
+			'u': ['ᴜ', 'ǔ', 'ŭ', 'ü', 'ʉ', 'ù', 'ú', 'û', 'ũ', 'ū', 'ų', 'ư', 'ů', 'ű', 'ȕ', 'ȗ', 'ụ'],
+			'v': ['ṿ', 'ⱱ', 'ᶌ', 'ṽ', 'ⱴ'],
+			'w': ['vv', 'ŵ', 'ẁ', 'ẃ', 'ẅ', 'ⱳ', 'ẇ', 'ẉ', 'ẘ'],
+			'y': ['ʏ', 'ý', 'ÿ', 'ŷ', 'ƴ', 'ȳ', 'ɏ', 'ỿ', 'ẏ', 'ỵ'],
+			'z': ['ʐ', 'ż', 'ź', 'ᴢ', 'ƶ', 'ẓ', 'ẕ', 'ⱬ']
 			}
 		result_1pass = set()
 		for ws in range(1, len(self.domain)):
@@ -318,15 +332,12 @@ class DomainFuzz():
 		result = []
 		for i in range(0, len(self.domain)):
 			result.append(self.domain[:i] + self.domain[i+1:])
-		n = re.sub(r'(.)\1+', r'\1', self.domain)
-		if n not in result and n != self.domain:
-			result.append(n)
 		return list(set(result))
 
 	def __repetition(self):
 		result = []
 		for i in range(0, len(self.domain)):
-			if self.domain[i].isalpha():
+			if self.domain[i].isalnum():
 				result.append(self.domain[:i] + self.domain[i] + self.domain[i] + self.domain[i+1:])
 		return list(set(result))
 
@@ -371,10 +382,11 @@ class DomainFuzz():
 	def __dictionary(self):
 		result = []
 		for word in self.dictionary:
-			result.append(self.domain + '-' + word)
-			result.append(self.domain + word)
-			result.append(word + '-' + self.domain)
-			result.append(word + self.domain)
+			if not (self.domain.startswith(word) and self.domain.endswith(word)):
+				result.append(self.domain + '-' + word)
+				result.append(self.domain + word)
+				result.append(word + '-' + self.domain)
+				result.append(word + self.domain)
 		return list(set(result))
 
 	def __tld(self):
@@ -417,7 +429,20 @@ class DomainFuzz():
 			self.domains.append({'fuzzer': 'various', 'domain-name': self.domain + self.tld + '.' + self.tld})
 		if self.tld != 'com' and '.' not in self.tld:
 			self.domains.append({'fuzzer': 'various', 'domain-name': self.domain + '-' + self.tld + '.com'})
-		self.__filter_domains()
+		self.__postprocess()
+
+	def permutations(self, registered=False, dns_all=False):
+		domains = []
+		if registered:
+			domains = [x.copy() for x in self.domains if len(x) > 2]
+		else:
+			domains = self.domains.copy()
+		if not dns_all:
+			for i in range(len(domains)):
+				for k in ('dns-ns', 'dns-a', 'dns-aaaa', 'dns-mx'):
+					if k in domains[i]:
+						domains[i][k] = domains[i][k][:1]
+		return domains
 
 
 class DomainThread(threading.Thread):
@@ -425,6 +450,7 @@ class DomainThread(threading.Thread):
 		threading.Thread.__init__(self)
 		self.jobs = queue
 		self.kill_received = False
+		self.debug = False
 
 		self.ssdeep_init = ''
 		self.ssdeep_effective_url = ''
@@ -441,6 +467,10 @@ class DomainThread(threading.Thread):
 
 		self.nameservers = []
 		self.useragent = ''
+
+	def __debug(self, text):
+		if self.debug:
+			print(str(text), file=sys.stderr, flush=True)
 
 	def __banner_http(self, ip, vhost):
 		try:
@@ -474,8 +504,8 @@ class DomainThread(threading.Thread):
 			return hello[:40]
 
 	def __mxcheck(self, mx, from_domain, to_domain):
-		from_addr = 'randombob' + str(randint(1, 9)) + '@' + from_domain
-		to_addr = 'randomalice' + str(randint(1, 9)) + '@' + to_domain
+		from_addr = 'randombob1986@' + from_domain
+		to_addr = 'randomalice1986@' + to_domain
 		try:
 			smtp = smtplib.SMTP(mx, 25, timeout=REQUEST_TIMEOUT_SMTP)
 			smtp.sendmail(from_addr, to_addr, 'And that\'s how the cookie crumbles')
@@ -492,6 +522,24 @@ class DomainThread(threading.Thread):
 		self.kill_received = True
 
 	def run(self):
+		if self.option_extdns:
+			if self.nameservers:
+				resolv = Resolver(configure=False)
+				resolv.nameservers = self.nameservers
+			else:
+				resolv = Resolver()
+				resolv.search = []
+
+			resolv.lifetime = REQUEST_TIMEOUT_DNS * REQUEST_RETRIES_DNS
+			resolv.timeout = REQUEST_TIMEOUT_DNS
+			EDNS_PAYLOAD = 1232
+			resolv.use_edns(edns=True, ednsflags=0, payload=EDNS_PAYLOAD)
+
+			if hasattr(resolv, 'resolve'):
+				resolve = resolv.resolve
+			else:
+				resolve = resolv.query
+
 		while not self.kill_received:
 			try:
 				domain = self.jobs.get(block=False)
@@ -499,18 +547,7 @@ class DomainThread(threading.Thread):
 				self.kill_received = True
 				return
 
-			domain['domain-name'] = domain['domain-name'].encode('idna').decode()
-
 			if self.option_extdns:
-				if self.nameservers:
-					resolv = dns.resolver.Resolver(configure=False)
-					resolv.nameservers = self.nameservers
-				else:
-					resolv = dns.resolver.Resolver()
-
-				resolv.lifetime = REQUEST_TIMEOUT_DNS * REQUEST_RETRIES_DNS
-				resolv.timeout = REQUEST_TIMEOUT_DNS
-
 				nxdomain = False
 				dns_ns = False
 				dns_a = False
@@ -518,54 +555,48 @@ class DomainThread(threading.Thread):
 				dns_mx = False
 
 				try:
-					domain['dns-ns'] = self.__answer_to_list(resolv.query(domain['domain-name'], rdtype=dns.rdatatype.NS))
+					domain['dns-ns'] = self.__answer_to_list(resolve(domain['domain-name'], rdtype=dns.rdatatype.NS))
 					dns_ns = True
-				except dns.resolver.NXDOMAIN:
+				except NXDOMAIN:
 					nxdomain = True
-					pass
-				except dns.resolver.NoNameservers:
+				except NoNameservers:
 					domain['dns-ns'] = ['!ServFail']
-					pass
-				except DNSException:
-					pass
+				except DNSException as e:
+					self.__debug(e)
 
 				if nxdomain is False:
 					try:
-						domain['dns-a'] = self.__answer_to_list(resolv.query(domain['domain-name'], rdtype=dns.rdatatype.A))
+						domain['dns-a'] = self.__answer_to_list(resolve(domain['domain-name'], rdtype=dns.rdatatype.A))
 						dns_a = True
-					except dns.resolver.NoNameservers:
+					except NoNameservers:
 						domain['dns-a'] = ['!ServFail']
-						pass
-					except DNSException:
-						pass
+					except DNSException as e:
+						self.__debug(e)
 
 					try:
-						domain['dns-aaaa'] = self.__answer_to_list(resolv.query(domain['domain-name'], rdtype=dns.rdatatype.AAAA))
+						domain['dns-aaaa'] = self.__answer_to_list(resolve(domain['domain-name'], rdtype=dns.rdatatype.AAAA))
 						dns_aaaa = True
-					except dns.resolver.NoNameservers:
+					except NoNameservers:
 						domain['dns-aaaa'] = ['!ServFail']
-						pass
-					except DNSException:
-						pass
+					except DNSException as e:
+						self.__debug(e)
 
 				if nxdomain is False and dns_ns is True:
 					try:
-						domain['dns-mx'] = self.__answer_to_list(resolv.query(domain['domain-name'], rdtype=dns.rdatatype.MX))
+						domain['dns-mx'] = self.__answer_to_list(resolve(domain['domain-name'], rdtype=dns.rdatatype.MX))
 						dns_mx = True
-					except dns.resolver.NoNameservers:
+					except NoNameservers:
 						domain['dns-mx'] = ['!ServFail']
-						pass
-					except DNSException:
-						pass
+					except DNSException as e:
+						self.__debug(e)
 			else:
 				try:
 					ip = socket.getaddrinfo(domain['domain-name'], 80)
 				except socket.gaierror as e:
 					if e.errno == -3:
 						domain['dns-a'] = ['!ServFail']
-					pass
-				except Exception:
-					pass
+				except Exception as e:
+					self.__debug(e)
 				else:
 					domain['dns-a'] = list()
 					domain['dns-aaaa'] = list()
@@ -589,7 +620,8 @@ class DomainThread(threading.Thread):
 				if dns_a is True:
 					try:
 						country = GeoIP.new(GeoIP.GEOIP_MEMORY_CACHE).country_name_by_addr(domain['dns-a'][0])
-					except Exception:
+					except Exception as e:
+						self.__debug(e)
 						pass
 					else:
 						if country:
@@ -610,43 +642,45 @@ class DomainThread(threading.Thread):
 					try:
 						req = requests.get(self.uri_scheme + '://' + domain['domain-name'] + self.uri_path + self.uri_query,
 							timeout=REQUEST_TIMEOUT_HTTP, headers={'User-Agent': self.useragent}, verify=False)
-					except Exception:
+					except Exception as e:
+						self.__debug(e)
 						pass
 					else:
 						if req.status_code // 100 == 2 and req.url.split('?')[0] != self.ssdeep_effective_url:
 							ssdeep_curr = ssdeep.hash(''.join(req.text.split()).lower())
 							domain['ssdeep-score'] = ssdeep.compare(self.ssdeep_init, ssdeep_curr)
 
-			domain['domain-name'] = domain['domain-name'].encode().decode('idna')
 			self.jobs.task_done()
 
 
 def create_json(domains=[]):
-	domains = list(domains)
-	for domain in domains:
-		domain['domain-name'] = domain['domain-name'].encode('idna').decode()
 	return json.dumps(domains, indent=4, sort_keys=True)
 
 
 def create_csv(domains=[]):
-	csv = ['fuzzer,domain-name,dns-a,dns-aaaa,dns-mx,dns-ns,geoip-country,whois-created,ssdeep-score']
+	csv = ['fuzzer,domain-name,dns-a,dns-aaaa,dns-mx,dns-ns,geoip-country,whois-registrar,whois-created,ssdeep-score']
 	for domain in domains:
-		csv.append(','.join([domain.get('fuzzer'), domain.get('domain-name').encode('idna').decode(),
+		csv.append(','.join([domain.get('fuzzer'), domain.get('domain-name'),
 			';'.join(domain.get('dns-a', [])),
 			';'.join(domain.get('dns-aaaa', [])),
 			';'.join(domain.get('dns-mx', [])),
 			';'.join(domain.get('dns-ns', [])),
-			domain.get('geoip-country', ''), domain.get('whois-created', ''),
+			domain.get('geoip-country', ''), domain.get('whois-registrar', ''), domain.get('whois-created', ''),
 			str(domain.get('ssdeep-score', ''))]))
 	return '\n'.join(csv)
 
 
 def create_list(domains=[]):
-	return '\n'.join([x.get('domain-name').encode('idna').decode() for x in domains])
+	return '\n'.join([x.get('domain-name') for x in domains])
 
 
 def create_cli(domains=[]):
 	cli = []
+	domains = list(domains)
+	if sys.stdout.encoding.lower() == 'utf-8':
+		for domain in domains:
+			name = domain['domain-name']
+			domain['domain-name'] = idna.decode(name)
 	width_fuzzer = max([len(x['fuzzer']) for x in domains]) + 1
 	width_domain = max([len(x['domain-name']) for x in domains]) + 1
 	for domain in domains:
@@ -666,9 +700,11 @@ def create_cli(domains=[]):
 			else:
 				info.append(FG_YEL + 'MX:' + FG_CYA + ';'.join(domain['dns-mx']) + FG_RST)
 		if 'banner-http' in domain:
-			info.append(FG_YEL + 'HTTP:' + FG_CYA + '"' + domain['banner-http'] + '"' + FG_RST)
+			info.append(FG_YEL + 'HTTP:' + FG_CYA + domain['banner-http'] + FG_RST)
 		if 'banner-smtp' in domain:
-			info.append(FG_YEL + 'SMTP:' + FG_CYA + '"' + domain['banner-smtp'] + '"' + FG_RST)
+			info.append(FG_YEL + 'SMTP:' + FG_CYA + domain['banner-smtp'] + FG_RST)
+		if 'whois-registrar' in domain:
+			info.append(FG_YEL + 'REGISTRAR:' + FG_CYA + domain['whois-registrar'] + FG_RST)
 		if 'whois-created' in domain:
 			info.append(FG_YEL + 'CREATED:' + FG_CYA + domain['whois-created'] + FG_RST)
 		if domain.get('ssdeep-score', 0) > 0:
@@ -708,6 +744,7 @@ def main():
 	parser.add_argument('--nameservers', type=str, metavar='LIST', help='DNS servers to query (separated with commas)')
 	parser.add_argument('--useragent', type=str, metavar='STRING', default='Mozilla/5.0 dnstwist/%s' % __version__,
 		help='User-Agent STRING to send with HTTP requests (default: Mozilla/5.0 dnstwist/%s)' % __version__)
+	parser.add_argument('--debug', action='store_true', help='Display debug messages')
 
 	def _exit(code):
 		print(FG_RST + ST_RST, end='')
@@ -725,7 +762,7 @@ def main():
 	def p_cli(text):
 		if args.format == 'cli': print(text, end='', flush=True)
 	def p_err(text):
-		print(text, file=sys.stderr, flush=True)
+		print(str(text), file=sys.stderr, flush=True)
 
 	def signal_handler(signal, frame):
 		print('\nStopping threads... ', file=sys.stderr, end='', flush=True)
@@ -850,7 +887,7 @@ def main():
 	for i in range(len(domains)):
 		jobs.put(domains[i])
 
-	for i in range(args.threads):
+	for _ in range(args.threads):
 		worker = DomainThread(jobs)
 		worker.setDaemon(True)
 
@@ -876,12 +913,14 @@ def main():
 			worker.nameservers = nameservers
 		worker.useragent = args.useragent
 
+		worker.debug = args.debug
+
 		worker.start()
 		threads.append(worker)
 
 	qperc = 0
 	while not jobs.empty():
-		p_cli('·')
+		p_cli('.')
 		qcurr = 100 * (len(domains) - jobs.qsize()) / len(domains)
 		if qcurr - 20 >= qperc:
 			qperc = qcurr
@@ -894,29 +933,29 @@ def main():
 
 	p_cli(' %d hits\n' % sum([1 for x in domains if len(x) > 2]))
 
-	if args.registered:
-		domains[:] = [x for x in domains if len(x) > 2]
+	domains = fuzz.permutations(registered=args.registered, dns_all=args.all)
 
-	if MODULE_WHOIS and args.whois and not fuzz.subdomain:
+	if MODULE_WHOIS and args.whois:
 		p_cli('Querying WHOIS servers ')
 		for domain in domains:
 			if len(domain) > 2:
 				p_cli('·')
 				try:
-					whoisq = whois.query(domain['domain-name'].encode('idna').decode())
-					if whoisq:
+					_, dom, tld = fuzz.domain_tld(domain['domain-name'])
+					whoisq = whois.query('.'.join([dom, tld]))
+				except Exception as e:
+					if args.debug:
+						p_err(e)
+				else:
+					if whoisq is None:
+						continue
+					if whoisq.creation_date:
 						domain['whois-created'] = str(whoisq.creation_date).split(' ')[0]
-				except Exception:
-					pass
+					if whoisq.registrar:
+						domain['whois-registrar'] = str(whoisq.registrar)
 		p_cli(' Done\n')
 
 	p_cli('\n')
-
-	if not args.all:
-		for i in range(len(domains)):
-			for k in ['dns-ns', 'dns-a', 'dns-aaaa', 'dns-mx']:
-				if k in domains[i]:
-					domains[i][k] = domains[i][k][:1]
 
 	if domains:
 		if args.format == 'csv':

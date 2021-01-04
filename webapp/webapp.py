@@ -20,10 +20,11 @@ SESSION_MAX = int(os.environ.get('SESSION_MAX', 20))
 WEBAPP_HTML = os.environ.get('WEBAPP_HTML', 'webapp.html')
 WEBAPP_DIR = os.environ.get('WEBAPP_DIR', os.path.dirname(__file__))
 
-DICTIONARY = ['auth', 'account', 'confirm', 'connect', 'enroll', 'http', 'https', 'login', 'mail', 'my', 'online',
-	'payment', 'portal', 'recovery', 'register', 'ssl', 'safe', 'secure', 'signin', 'signup', 'support', 'update',
-	'user', 'verify', 'verification', 'web', 'www']
-TLD_DICTIONARY = ['com', 'cn', 'net', 'eu', 'ga', 'tk', 'ml', 'cf', 'info', 'app', 'ooo', 'xyz', 'online', 'site']
+DICTIONARY = ('auth', 'account', 'confirm', 'connect', 'enroll', 'http', 'https', 'info', 'login', 'mail', 'my',
+	'online', 'payment', 'portal', 'recovery', 'register', 'ssl', 'safe', 'secure', 'signin', 'signup', 'support',
+	'update', 'user', 'verify', 'verification', 'web', 'www')
+TLD_DICTIONARY = ('com', 'net', 'org', 'info', 'cn', 'co', 'eu', 'de', 'uk', 'pw', 'ga', 'gq', 'tk', 'ml', 'cf',
+	'app', 'biz', 'top', 'xyz', 'online', 'site', 'live')
 
 
 sessions = []
@@ -61,15 +62,21 @@ class Session():
 		for worker in self.threads:
 			worker.stop()
 			worker.join()
+		self.threads.clear()
 
 	def domains(self):
-		return [x for x in self.permutations if len(x) > 2]
+		domains = list([x.copy() for x in self.permutations if len(x) > 2])
+		for domain in domains:
+			domain['domain-name'] = domain['domain-name'].encode().decode('idna')
+		return domains
 
 	def status(self):
+		if self.jobs.empty():
+			self.stop()
 		total = len(self.permutations)
-		remaining = self.jobs.qsize()
+		remaining = max(self.jobs.qsize(), len(self.threads))
 		complete = total - remaining
-		registered = len(self.domains())
+		registered = len([x for x in self.permutations if len(x) > 2])
 		return {
 			'id': self.id,
 			'timestamp': self.timestamp,
@@ -82,10 +89,10 @@ class Session():
 
 	def csv(self):
 		csv = ['fuzzer,domain-name,dns-a,dns-aaaa,dns-ns,dns-mx,geoip-country']
-		for domain in self.domains():
+		for domain in list([x for x in self.permutations if len(x) > 2]):
 			csv.append(','.join([
 				domain.get('fuzzer'),
-				domain.get('domain-name').encode('idna').decode(),
+				domain.get('domain-name'),
 				domain.get('dns-a', [''])[0],
 				domain.get('dns-aaaa', [''])[0],
 				domain.get('dns-ns', [''])[0],
@@ -93,6 +100,9 @@ class Session():
 				domain.get('geoip-country', '')
 				]))
 		return '\n'.join(csv)
+
+	def json(self):
+		return list([x for x in self.permutations if len(x) > 2])
 
 
 @app.route('/')
@@ -144,6 +154,14 @@ def api_csv(sid):
 	for s in sessions:
 		if s.id == sid:
 			return s.csv(), 200, {'Content-Type': 'text/csv', 'Content-Disposition': 'attachment; filename=dnstwist.csv'}
+	return jsonify({'message': 'Scan session not found'}), 404
+
+
+@app.route('/api/scans/<sid>/json')
+def api_json(sid):
+	for s in sessions:
+		if s.id == sid:
+			return jsonify(s.json()), 200, {'Content-Disposition': 'attachment; filename=dnstwist.json'}
 	return jsonify({'message': 'Scan session not found'}), 404
 
 
